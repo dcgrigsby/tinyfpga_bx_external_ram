@@ -1,5 +1,6 @@
-// Partial, simplified but hopefully adequate Verilog implementation of:
+// Partial, simplified but hopefully adequate implementation of:
 // https://www.alliancememory.com/wp-content/uploads/pdf/AS6C1008feb2007.pdf
+// for use with test benchs
 
 module sram_128k_8v(
   A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16,
@@ -16,9 +17,8 @@ module sram_128k_8v(
   // 17 bit memory address; 2^17 = 131,072; references the numberth word
   // multiply by 8 to get the position in the register
   input A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16;
-  reg [17:0] address, previousAddress;
 
-  // Data Inouts
+  // Data Inputs
   inout DQ0, DQ1, DQ2, DQ3, DQ4, DQ5, DQ6, DQ7;
 
   // Chip Enable Inputs
@@ -30,23 +30,110 @@ module sram_128k_8v(
   // Output Enable Input
   input OElow;
 
-  `ifdef SIM
-    reg clk;
-    initial clk = 0;
-    always #1 clk = ~clk;
-  `else
-    // TODO implement synthesizable clock
-  `endif
+  reg clk;
+  initial clk = 0;
+  always #1 clk = ~clk;
 
-  // Read timing registers:
+  // # chip state machine
+  reg [1:0] chip_state;
+  parameter standby         = 2'b00;
+  parameter output_disabled = 2'b01;
+  parameter read            = 2'b10;
+  parameter write           = 2'b11;
 
-  // TRC (read cycle time) min 55ns -> wait this long after address valid before putting data in DQ*
-  parameter TRC = 55;
-  reg [5:0] trc <= TRC;
+  // truth table from p3 of the data sheet
+  always @ ( posedge CElow or negedge CE2 ) begin
+      chip_state <= standby;
+  end
 
-  // TOH (output hold from address change) min 10ns -> keep previous data on DQ* for this long
-  parameter TOH = 10;
-  reg [3:0] toh <= TOH;
+  always @ ( negedge CElow or posedge CE2 or posedge OElow or posedge WElow ) begin
+    if (!CElow && CE2 && OElow && WElow)
+      chip_state <= output_disabled;
+  end
+
+  always @ ( posedge WElow ) begin
+    if (!CElow && CE2 && !OElow && WElow)
+      chip_state <= read;
+  end
+
+  always @ ( negedge WElow ) begin
+    if (!CElow && CE2 && !WElow)
+      chip_state <= write;
+  end
+
+  // # respond to address changes
+  reg [17:0] address, previousAddress;
+  reg [5:0] timing_counter;
+
+  always @ ( posedge clk ) begin
+    if (state != standby)
+      begin
+        address <= {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16};
+        if (address != previousAddress)
+          begin
+            previousAddress <= address;
+            timing_counter <= 0;
+          end
+        else
+          // all timing based operations have completed by 55 clock ticks
+          if (timing_counter < 55)
+            timing_counter <= timing_counter + 1
+      end
+  end
+
+  // # read state machine
+  reg [1:0] read_state;
+  parameter toh      <= 2'b00;
+  parameter trc      <= 2'b01;
+  parameter readable <= 2'b02;
+
+  always @ ( posedge clk ) begin
+    if (chip_state == read)
+      begin
+        // timing from data sheet p4 "read cyle"
+        if (timing_counter < 10)
+          read_state <= toh;
+        else if (timing_counter < 55)
+          read_state <= trc;
+        else
+          read_state <= readable;
+      end
+  end
+
+  always @ ( posedge clk ) begin
+    if (chip_state == read)
+      begin
+        case (read_state)
+          trc:
+            begin
+              // previous data unavaible after toh
+              assign DQ0 <= 0;
+              assign DQ1 <= 0;
+              assign DQ2 <= 0;
+              assign DQ3 <= 0;
+              assign DQ4 <= 0;
+              assign DQ5 <= 0;
+              assign DQ6 <= 0;
+              assign DQ7 <= 0;
+            end
+          readable:
+            begin
+              assign DQ0 <= sram[address * 8];
+              assign DQ1 <= sram[address * 8 + 1];
+              assign DQ2 <= sram[address * 8 + 2];
+              assign DQ3 <= sram[address * 8 + 3];
+              assign DQ4 <= sram[address * 8 + 4];
+              assign DQ5 <= sram[address * 8 + 5];
+              assign DQ6 <= sram[address * 8 + 6];
+              assign DQ7 <= sram[address * 8 + 7];
+            end
+        endcase
+      end
+  end
+
+  
+
+
 
   // Write timing registers:
 
@@ -63,52 +150,8 @@ module sram_128k_8v(
   reg [5:0] twp <= TWP;
 
   always @ ( posedge clk ) begin
-    if (!CElow && CE2)
+    if (!CElow && CE2) // chip enabled
       begin
-        address <= {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16};
-
-        // address controlled read
-        if (WElow && !OElow)
-          begin
-            if (address != previousAddress)
-              begin
-                previousAddress <= address;
-                trc <= TRC;
-                toh <= TOH;
-                twc <= TWC;
-                tdw <= TDW;
-                twp <= TWP;
-              end
-
-            if (trc == 0)
-              begin
-                assign DQ0 <= sram[address * 8];
-                assign DQ1 <= sram[address * 8 + 1];
-                assign DQ2 <= sram[address * 8 + 2];
-                assign DQ3 <= sram[address * 8 + 3];
-                assign DQ4 <= sram[address * 8 + 4];
-                assign DQ5 <= sram[address * 8 + 5];
-                assign DQ6 <= sram[address * 8 + 6];
-                assign DQ7 <= sram[address * 8 + 7];
-              end
-            else if (trc > 0)
-              trc <= trc - 1;
-
-            if (toh == 0)
-              begin
-                assign DQ0 <= 0;
-                assign DQ1 <= 0;
-                assign DQ2 <= 0;
-                assign DQ3 <= 0;
-                assign DQ4 <= 0;
-                assign DQ5 <= 0;
-                assign DQ6 <= 0;
-                assign DQ7 <= 0;
-              end
-            else if (toh > 0)
-              toh <= toh - 1;
-          end
-
           // WElow controlled write
           if (!WElow)
             begin
